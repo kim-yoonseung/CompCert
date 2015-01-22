@@ -20,14 +20,28 @@ open AST
 open Memdata
 open Asm
 
+(* Type for the ABI versions *)
+type float_abi_type =
+  | Hard
+  | Soft
+
+(* Module type for the options *)
+module type PRINTER_OPTIONS =
+    sig
+      val float_abi: float_abi_type
+      val vfpv3: bool
+      val hardware_idiv: bool
+      val cfi_startproc: out_channel -> unit
+      val cfi_endproc: out_channel -> unit
+      val cfi_adjust: out_channel -> int32 -> unit
+      val cfi_rel_offset: out_channel -> string -> int32 -> unit
+     end
+
+(* Module containing the printing functions *)
+
+module AsmPrinter (Opt: PRINTER_OPTIONS) =
+  (struct
 (* Code generation options. *)
-
-let vfpv3 = Configuration.model >= "armv7"
-
-let hardware_idiv () =
-  match Configuration.model with
-  | "armv7r" | "armv7m" -> !Clflags.option_mthumb
-  | _ -> false
 
 let literals_in_code = ref true     (* to be turned into a proper option *)
 
@@ -153,8 +167,10 @@ let thumbS oc =
 
 let name_of_section = function
   | Section_text -> ".text"
-  | Section_data i | Section_small_data i -> if i then ".data" else "COMM"
-  | Section_const | Section_small_const -> ".section	.rodata"
+  | Section_data i | Section_small_data i ->
+      if i then ".data" else "COMM"
+  | Section_const i | Section_small_const i ->
+      if i then ".section	.rodata" else "COMM"
   | Section_string -> ".section	.rodata"
   | Section_literal -> ".text"
   | Section_jumptable -> ".text"
@@ -305,42 +321,11 @@ let is_immediate_float32 bits =
 
 (* Emit .file / .loc debugging directives *)
 
-let filename_num : (string, int) Hashtbl.t = Hashtbl.create 7
-
 let print_file_line oc file line =
-  if !Clflags.option_g && file <> "" then begin
-    let filenum = 
-      try
-        Hashtbl.find filename_num file
-      with Not_found ->
-        let n = Hashtbl.length filename_num + 1 in
-        Hashtbl.add filename_num file n;
-        fprintf oc "	.file	%d %S\n" n file;
-        n
-    in fprintf oc "	.loc	%d %s\n" filenum line
-  end
+  PrintAnnot.print_file_line oc comment file line
 
 let print_location oc loc =
-  if loc <> Cutil.no_loc then
-    print_file_line oc (fst loc) (string_of_int (snd loc))
-
-(* Emit .cfi directives *)
-
-let cfi_startproc oc =
-  if Configuration.asm_supports_cfi then
-    fprintf oc "	.cfi_startproc\n"
-
-let cfi_endproc oc =
-  if Configuration.asm_supports_cfi then
-    fprintf oc "	.cfi_endproc\n"
-
-let cfi_adjust oc delta =
-  if Configuration.asm_supports_cfi then
-    fprintf oc "	.cfi_adjust_cfa_offset	%ld\n" delta
-
-let cfi_rel_offset oc reg ofs =
-  if Configuration.asm_supports_cfi then
-    fprintf oc "	.cfi_rel_offset	%s, %ld\n" reg ofs
+  if loc <> Cutil.no_loc then print_file_line oc (fst loc) (snd loc)
 
 (* Built-ins.  They come in two flavors: 
    - annotation statements: take their arguments in registers or stack
@@ -355,7 +340,8 @@ let re_file_line = Str.regexp "#line:\\(.*\\):\\([1-9][0-9]*\\)$"
 
 let print_annot_stmt oc txt targs args =
   if Str.string_match re_file_line txt 0 then begin
-    print_file_line oc (Str.matched_group 1 txt) (Str.matched_group 2 txt)
+    print_file_line oc (Str.matched_group 1 txt)
+                       (int_of_string (Str.matched_group 2 txt))
   end else begin
     fprintf oc "%s annotation: " comment;
     PrintAnnot.print_annot_stmt preg "sp" oc txt targs args
@@ -743,11 +729,10 @@ module FixupHF = struct
 end
 
 let (fixup_arguments, fixup_result) =
-  match Configuration.abi with
-  | "eabi"      -> (FixupEABI.fixup_arguments, FixupEABI.fixup_result)
-  | "hardfloat" -> (FixupHF.fixup_arguments, FixupHF.fixup_result)
-  | _ -> assert false
-
+  match Opt.float_abi with
+  | Soft -> (FixupEABI.fixup_arguments, FixupEABI.fixup_result)
+  | Hard -> (FixupHF.fixup_arguments, FixupHF.fixup_result)
+ 
 (* Printing of instructions *)
 
 let shift_op oc = function
@@ -840,7 +825,7 @@ let print_instruction oc = function
   | Pstr(r1, r2, sa) | Pstr_a(r1, r2, sa) ->
       fprintf oc "	str	%a, [%a, %a]\n" ireg r1 ireg r2 shift_op sa;
       begin match r1, r2, sa with
-      | IR14, IR13, SOimm n -> cfi_rel_offset oc "lr" (camlint_of_coqint n)
+      | IR14, IR13, SOimm n -> Opt.cfi_rel_offset oc "lr" (camlint_of_coqint n)
       | _ -> ()
       end;
       1
@@ -849,7 +834,7 @@ let print_instruction oc = function
   | Pstrh(r1, r2, sa) ->
       fprintf oc "	strh	%a, [%a, %a]\n" ireg r1 ireg r2 shift_op sa; 1
   | Psdiv ->
-      if hardware_idiv() then begin
+      if Opt.hardware_idiv then begin
         fprintf oc "	sdiv	r0, r0, r1\n"; 1
       end else begin
         fprintf oc "	bl	__aeabi_idiv\n"; 1
@@ -862,7 +847,7 @@ let print_instruction oc = function
       fprintf oc "	sub%t	%a, %a, %a\n"
               thumbS ireg r1 ireg r2 shift_op so; 1
   | Pudiv ->
-      if hardware_idiv() then begin
+      if Opt.hardware_idiv then begin
         fprintf oc "	udiv	r0, r0, r1\n"; 1
       end else begin
         fprintf oc "	bl	__aeabi_uidiv\n"; 1
@@ -886,7 +871,7 @@ let print_instruction oc = function
       fprintf oc "	vsub.f64 %a, %a, %a\n" freg r1 freg r2 freg r3; 1
   | Pflid(r1, f) ->
       let f = camlint64_of_coqint(Floats.Float.to_bits f) in
-      if vfpv3 && is_immediate_float64 f then begin
+      if Opt.vfpv3 && is_immediate_float64 f then begin
         fprintf oc "	vmov.f64 %a, #%F\n"
                    freg r1 (Int64.float_of_bits f); 1
         (* immediate floats have at most 4 bits of fraction, so they
@@ -934,7 +919,7 @@ let print_instruction oc = function
       fprintf oc "	vsub.f32 %a, %a, %a\n" freg_single r1 freg_single r2 freg_single r3; 1
   | Pflis(r1, f) ->
       let f = camlint_of_coqint(Floats.Float32.to_bits f) in
-      if vfpv3 && is_immediate_float32 f then begin
+      if Opt.vfpv3 && is_immediate_float32 f then begin
         fprintf oc "	vmov.f32 %a, #%F\n"
                 freg_single r1 (Int32.float_of_bits f); 1
         (* immediate floats have at most 4 bits of fraction, so they
@@ -984,11 +969,11 @@ let print_instruction oc = function
       fprintf oc "	mov	r12, sp\n";
       if (!current_function_sig).sig_cc.cc_vararg then begin
         fprintf oc "	push	{r0, r1, r2, r3}\n";
-        cfi_adjust oc 16l
+        Opt.cfi_adjust oc 16l
       end;
       let sz' = camlint_of_coqint sz in
       let ninstr = subimm oc "sp" "sp" sz in
-      cfi_adjust oc sz';
+      Opt.cfi_adjust oc sz';
       fprintf oc "	str	r12, [sp, #%a]\n" coqint ofs;
       current_function_stacksize := sz';
       ninstr + (if (!current_function_sig).sig_cc.cc_vararg then 3 else 2)
@@ -1104,11 +1089,11 @@ let print_function oc name fn =
     fprintf oc "	.thumb_func\n";
   fprintf oc "%a:\n" print_symb name;
   print_location oc (C2C.atom_location name);
-  cfi_startproc oc;
+  Opt.cfi_startproc oc;
   ignore (fixup_arguments oc Incoming fn.fn_sig);
   print_instructions oc fn.fn_code;
   if !literals_in_code then emit_constants oc;
-  cfi_endproc oc;
+  Opt.cfi_endproc oc;
   fprintf oc "	.type	%a, %%function\n" print_symb name;
   fprintf oc "	.size	%a, . - %a\n" print_symb name print_symb name;
   if not !literals_in_code && !size_constants > 0 then begin
@@ -1188,9 +1173,53 @@ let print_globdef oc (name, gdef) =
   | Gfun(External ef) -> ()
   | Gvar v -> print_var oc name v
 
+  end)
+
 let print_program oc p =
-  PrintAnnot.print_version_and_options oc comment;
-  Hashtbl.clear filename_num;
+   let module Opt : PRINTER_OPTIONS = struct
+   
+   let vfpv3 = Configuration.model >= "armv7"
+   
+   let float_abi = match Configuration.abi with
+   | "eabi"      -> Soft
+   | "hardfloat" -> Hard
+   | _ -> assert false
+   
+   let hardware_idiv  =
+   match  Configuration.model with
+   | "armv7r" | "armv7m" -> !Clflags.option_mthumb
+   | _ -> false
+   
+   
+   (* Emit .cfi directives *)
+   let cfi_startproc =
+   if Configuration.asm_supports_cfi then
+   (fun oc -> fprintf oc "	.cfi_startproc\n")
+   else
+   (fun _ -> ())
+   
+   let cfi_endproc =
+   if Configuration.asm_supports_cfi then
+   (fun oc ->fprintf oc "	.cfi_endproc\n")
+   else
+   (fun _ -> ())
+   
+   let cfi_adjust =
+   if Configuration.asm_supports_cfi then
+   (fun oc delta ->   fprintf oc "	.cfi_adjust_cfa_offset	%ld\n" delta)
+   else
+   (fun _ _ -> ())
+   
+   let cfi_rel_offset =
+   if Configuration.asm_supports_cfi then
+   (fun oc reg ofs -> fprintf oc "	.cfi_rel_offset	%s, %ld\n" reg ofs)
+   else
+   (fun _ _ _ -> ())
+
+   end in
+  let module Printer = AsmPrinter(Opt) in
+  PrintAnnot.reset_filenames();
+  PrintAnnot.print_version_and_options oc Printer.comment;
   fprintf oc "	.syntax	unified\n";
   fprintf oc "	.arch	%s\n"
           (match Configuration.model with
@@ -1200,8 +1229,8 @@ let print_program oc p =
            | "armv7m" -> "armv7-m"
            | _ -> "armv7");
   fprintf oc "	.fpu	%s\n"
-          (if vfpv3 then "vfpv3-d16" else "vfpv2");
+          (if Opt.vfpv3 then "vfpv3-d16" else "vfpv2");
   fprintf oc "	.%s\n" (if !Clflags.option_mthumb then "thumb" else "arm");
-  List.iter (print_globdef oc) p.prog_defs
-
+  List.iter (Printer.print_globdef oc) p.prog_defs;
+  PrintAnnot.close_filenames()
 

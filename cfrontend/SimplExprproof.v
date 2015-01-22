@@ -49,6 +49,13 @@ Proof.
   simpl. tauto.
 Qed.
 
+Lemma public_preserved:
+  forall (s: ident), Genv.public_symbol tge s = Genv.public_symbol ge s.
+Proof.
+  intros. eapply Genv.public_symbol_match. eapply transl_program_spec; eauto. 
+  simpl. tauto.
+Qed.
+
 Lemma function_ptr_translated:
   forall b f,
   Genv.find_funct_ptr ge b = Some f ->
@@ -155,7 +162,7 @@ Proof.
   rewrite H1. split; auto. eapply deref_loc_value; eauto.
   (* By_value, volatile *)
   rewrite H0; rewrite H1. eapply volatile_load_preserved with (ge1 := ge); auto.
-  exact symbols_preserved. exact block_is_volatile_preserved.
+  exact symbols_preserved. exact public_preserved. exact block_is_volatile_preserved.
   (* By reference *)
   rewrite H0. destruct (type_is_volatile ty); split; auto; eapply deref_loc_reference; eauto.
   (* By copy *)
@@ -175,7 +182,7 @@ Proof.
   rewrite H1. split; auto. eapply assign_loc_value; eauto.
   (* By_value, volatile *)
   rewrite H0; rewrite H1. eapply volatile_store_preserved with (ge1 := ge); auto.
-  exact symbols_preserved. exact block_is_volatile_preserved.
+  exact symbols_preserved. exact public_preserved. exact block_is_volatile_preserved.
   (* By copy *)
   rewrite H0. destruct (type_is_volatile ty); split; auto; eapply assign_loc_copy; eauto.
 Qed.
@@ -1301,7 +1308,7 @@ Fixpoint esize (a: Csyntax.expr) : nat :=
   | Csyntax.Ecomma r1 r2 _ => S(esize r1 + esize r2)%nat
   | Csyntax.Ecall r1 rl2 _ => S(esize r1 + esizelist rl2)%nat
   | Csyntax.Ebuiltin ef _ rl _ => S(esizelist rl)%nat
-  | Csyntax.Eparen r1 _ => S(esize r1)
+  | Csyntax.Eparen r1 _ _ => S(esize r1)
   end
 
 with esizelist (el: Csyntax.exprlist) : nat :=
@@ -1404,7 +1411,7 @@ Proof.
   apply push_seq. reflexivity. reflexivity.
   rewrite <- Kseqlist_app.
   eapply match_exprstates; eauto.
-  apply S. apply tr_paren_val with (a1 := dummy_expr); auto. econstructor; eauto. 
+  apply S. apply tr_paren_val with (a1 := a2); auto. 
   apply tr_expr_monotone with tmp2; eauto. auto. auto.
   (* for effects *)
   exploit tr_simple_rvalue; eauto. intros [SL [TY EV]].
@@ -1415,7 +1422,7 @@ Proof.
   apply push_seq. reflexivity. reflexivity.
   rewrite <- Kseqlist_app.
   eapply match_exprstates; eauto.
-  apply S. apply tr_paren_effects with (a1 := dummy_expr); auto. econstructor; eauto. 
+  apply S. apply tr_paren_effects with (a1 := a2); auto.
   apply tr_expr_monotone with tmp2; eauto. auto. auto.
   (* for set *)
   exploit tr_simple_rvalue; eauto. intros [SL [TY EV]].
@@ -1426,9 +1433,8 @@ Proof.
   apply push_seq. reflexivity. reflexivity.
   rewrite <- Kseqlist_app.
   eapply match_exprstates; eauto.
-  apply S. apply tr_paren_set with (a1 := dummy_expr) (t := sd_temp sd); auto.
-  apply tr_paren_set with (a1 := a2) (t := sd_temp sd).
-  apply tr_expr_monotone with tmp2; eauto. auto. auto. auto.
+  apply S. apply tr_paren_set with (a1 := a2) (t := sd_temp sd); auto.
+  apply tr_expr_monotone with tmp2; eauto. auto. auto.
 (* seqand false *)
   exploit tr_top_leftcontext; eauto. clear H9. 
   intros [dst' [sl1 [sl2 [a' [tmp' [P [Q [R S]]]]]]]].
@@ -1514,7 +1520,7 @@ Proof.
   apply push_seq. reflexivity. reflexivity.
   rewrite <- Kseqlist_app.
   eapply match_exprstates; eauto.
-  apply S. apply tr_paren_val with (a1 := dummy_expr); auto. econstructor; eauto. 
+  apply S. apply tr_paren_val with (a1 := a2); auto.  
   apply tr_expr_monotone with tmp2; eauto. auto. auto.
   (* for effects *)
   exploit tr_simple_rvalue; eauto. intros [SL [TY EV]].
@@ -1525,7 +1531,7 @@ Proof.
   apply push_seq. reflexivity. reflexivity.
   rewrite <- Kseqlist_app.
   eapply match_exprstates; eauto.
-  apply S. apply tr_paren_effects with (a1 := dummy_expr); auto. econstructor; eauto. 
+  apply S. apply tr_paren_effects with (a1 := a2); auto.
   apply tr_expr_monotone with tmp2; eauto. auto. auto.
   (* for set *)
   exploit tr_simple_rvalue; eauto. intros [SL [TY EV]].
@@ -1536,8 +1542,7 @@ Proof.
   apply push_seq. reflexivity. reflexivity.
   rewrite <- Kseqlist_app.
   eapply match_exprstates; eauto.
-  apply S. apply tr_paren_set with (a1 := dummy_expr) (t := sd_temp sd); auto.
-  apply tr_paren_set with (a1 := a2) (t := sd_temp sd); auto.
+  apply S. apply tr_paren_set with (a1 := a2) (t := sd_temp sd); auto.
   apply tr_expr_monotone with tmp2; eauto. auto. auto.
 (* condition *)
   exploit tr_top_leftcontext; eauto. clear H9. 
@@ -1863,7 +1868,7 @@ Proof.
   left. eapply plus_left. constructor.  apply star_one.
   econstructor; eauto.
   eapply external_call_symbols_preserved; eauto. 
-  exact symbols_preserved. exact varinfo_preserved. 
+  exact symbols_preserved. exact public_preserved. exact varinfo_preserved. 
   traceEq.
   econstructor; eauto.
   change sl2 with (nil ++ sl2). apply S. constructor. simpl; auto. auto. 
@@ -1874,7 +1879,7 @@ Proof.
   left. eapply plus_left. constructor. apply star_one.
   econstructor; eauto.
   eapply external_call_symbols_preserved; eauto. 
-  exact symbols_preserved. exact varinfo_preserved. 
+  exact symbols_preserved. exact public_preserved. exact varinfo_preserved. 
   traceEq.
   econstructor; eauto.
   change sl2 with (nil ++ sl2). apply S.
@@ -2163,7 +2168,7 @@ Proof.
   econstructor; split.
   left; apply plus_one. econstructor; eauto.
   eapply external_call_symbols_preserved; eauto. 
-  exact symbols_preserved. exact varinfo_preserved. 
+  exact symbols_preserved. exact public_preserved. exact varinfo_preserved. 
   constructor; auto.
 
 (* return *)
@@ -2200,7 +2205,7 @@ Proof.
   econstructor.
   exploit Genv.init_mem_match; eauto.  
   simpl. fold tge. rewrite symbols_preserved.
-  destruct MP as [A B]. rewrite B; eexact H1.
+  destruct MP as (A & B & C). rewrite B; eexact H1.
   eexact FIND.
   rewrite <- H3. apply type_of_fundef_preserved. auto.
   constructor. auto. constructor.
@@ -2217,7 +2222,7 @@ Theorem transl_program_correct:
   forward_simulation (Cstrategy.semantics prog) (Clight.semantics1 tprog).
 Proof.
   eapply forward_simulation_star_wf with (order := ltof _ measure).
-  eexact symbols_preserved.
+  eexact public_preserved.
   eexact transl_initial_states.
   eexact transl_final_states.
   apply well_founded_ltof.

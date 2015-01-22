@@ -28,6 +28,8 @@ open Csyntax
 open Initializers
 open Floats
 
+(** ** Extracting information about global variables from their atom *)
+
 (** Record useful information about global variables and functions,
   and associate it with the corresponding atoms. *)
 
@@ -42,6 +44,61 @@ type atom_info =
 }
 
 let decl_atom : (AST.ident, atom_info) Hashtbl.t = Hashtbl.create 103
+
+let atom_is_static a =
+  try
+    let i = Hashtbl.find decl_atom a in
+    (* inline functions can remain in generated code, but should not
+       be global, unless explicitly marked "extern" *)
+    match i.a_storage with
+    | C.Storage_default -> i.a_inline
+    | C.Storage_extern -> false
+    | C.Storage_static -> true
+    | C.Storage_register -> false (* should not happen *)
+  with Not_found ->
+    false
+
+let atom_is_extern a =
+  try
+    (Hashtbl.find decl_atom a).a_storage = C.Storage_extern
+  with Not_found ->
+    false
+
+let atom_alignof a =
+  try
+    (Hashtbl.find decl_atom a).a_alignment
+  with Not_found ->
+    None
+
+let atom_sections a =
+  try
+    (Hashtbl.find decl_atom a).a_sections
+  with Not_found ->
+    []
+
+let atom_is_small_data a ofs =
+  try
+    (Hashtbl.find decl_atom a).a_access = Sections.Access_near
+  with Not_found ->
+    false
+
+let atom_is_rel_data a ofs =
+  try
+    (Hashtbl.find decl_atom a).a_access = Sections.Access_far
+  with Not_found ->
+    false
+
+let atom_is_inline a =
+  try
+    (Hashtbl.find decl_atom a).a_inline
+  with Not_found ->
+    false
+
+let atom_location a =
+  try
+    (Hashtbl.find decl_atom a).a_loc
+  with Not_found ->
+    Cutil.no_loc
 
 (** Hooks -- overriden in machine-dependent CPragmas module *)
 
@@ -131,7 +188,60 @@ let builtins_generic = {
     "__compcert_va_float64",
         (TFloat(FDouble, []),
           [TPtr(TVoid [], [])],
-          false)
+          false);
+  (* Helper functions for int64 arithmetic *)
+    "__i64_dtos",
+        (TInt(ILongLong, []),
+         [TFloat(FDouble, [])],
+         false);
+    "__i64_dtou",
+        (TInt(IULongLong, []),
+         [TFloat(FDouble, [])],
+         false);
+    "__i64_stod",
+        (TFloat(FDouble, []),
+         [TInt(ILongLong, [])],
+         false);
+    "__i64_utod",
+        (TFloat(FDouble, []),
+         [TInt(IULongLong, [])],
+         false);
+    "__i64_stof",
+        (TFloat(FFloat, []),
+         [TInt(ILongLong, [])],
+         false);
+    "__i64_utof",
+        (TFloat(FFloat, []),
+         [TInt(IULongLong, [])],
+         false);
+    "__i64_sdiv",
+        (TInt(ILongLong, []),
+         [TInt(ILongLong, []); TInt(ILongLong, [])],
+         false);
+    "__i64_udiv",
+        (TInt(IULongLong, []),
+         [TInt(IULongLong, []); TInt(IULongLong, [])],
+         false);
+    "__i64_smod",
+        (TInt(ILongLong, []),
+         [TInt(ILongLong, []); TInt(ILongLong, [])],
+         false);
+    "__i64_umod",
+        (TInt(IULongLong, []),
+         [TInt(IULongLong, []); TInt(IULongLong, [])],
+         false);
+    "__i64_shl",
+        (TInt(ILongLong, []),
+         [TInt(ILongLong, []); TInt(IInt, [])],
+         false);
+    "__i64_shr",
+        (TInt(IULongLong, []),
+         [TInt(IULongLong, []); TInt(IInt, [])],
+         false);
+    "__i64_sar",
+        (TInt(ILongLong, []),
+         [TInt(ILongLong, []); TInt(IInt, [])],
+         false)
   ]
 }
 
@@ -144,7 +254,8 @@ let builtins =
 (** ** Functions used to handle string literals *)
 
 let stringNum = ref 0   (* number of next global for string literals *)
-let stringTable = Hashtbl.create 47
+let stringTable : (string, AST.ident) Hashtbl.t = Hashtbl.create 47
+let wstringTable : (int64 list, AST.ident) Hashtbl.t = Hashtbl.create 47
 
 let name_for_string_literal env s =
   try
@@ -164,7 +275,8 @@ let name_for_string_literal env s =
     id
 
 let typeStringLiteral s =
-  Tarray(Tint(I8, Unsigned, noattr), Z.of_uint (String.length s + 1), noattr)
+  let sg = if Machine.((!config).char_signed) then Signed else Unsigned in
+  Tarray(Tint(I8, sg, noattr), Z.of_uint (String.length s + 1), noattr)
 
 let global_for_string s id =
   let init = ref [] in
@@ -175,10 +287,57 @@ let global_for_string s id =
   (id, Gvar {gvar_info = typeStringLiteral s; gvar_init = !init;
              gvar_readonly = true; gvar_volatile = false})
 
+let name_for_wide_string_literal env s =
+  try
+    Hashtbl.find wstringTable s
+  with Not_found ->
+    incr stringNum;
+    let name = Printf.sprintf "__stringlit_%d" !stringNum in
+    let id = intern_string name in
+    Hashtbl.add decl_atom id
+      { a_storage = C.Storage_static;
+        a_alignment = Some Machine.((!config).sizeof_wchar);
+        a_sections = [Sections.for_stringlit()];
+        a_access = Sections.Access_default;
+        a_inline = false;
+        a_loc = Cutil.no_loc };
+    Hashtbl.add wstringTable s id;
+    id
+
+let typeWideStringLiteral s =
+  let sz =
+    match Machine.((!config).sizeof_wchar) with
+    | 2 -> I16
+    | 4 -> I32
+    | _ -> assert false in
+  let sg =
+    if Machine.((!config).wchar_signed) then Signed else Unsigned in
+  Tarray(Tint(sz, sg, noattr), Z.of_uint (List.length s + 1), noattr)
+
+let global_for_wide_string s id =
+  let init = ref [] in
+  let init_of_char =
+    match Machine.((!config).sizeof_wchar) with
+    | 2 -> (fun z -> AST.Init_int16 z)
+    | 4 -> (fun z -> AST.Init_int32 z)
+    | _ -> assert false in
+  let add_char c =
+    init := init_of_char(Z.of_uint64 c) :: !init in
+  List.iter add_char s;
+  add_char 0L;
+  (id, Gvar {gvar_info = typeWideStringLiteral s; gvar_init = List.rev !init;
+             gvar_readonly = true; gvar_volatile = false})
+
 let globals_for_strings globs =
-  Hashtbl.fold
-    (fun s id l -> global_for_string s id :: l)
-    stringTable globs
+  let globs1 =
+    Hashtbl.fold
+      (fun s id l -> global_for_wide_string s id :: l)
+      wstringTable globs in
+  let globs2 =
+    Hashtbl.fold
+      (fun s id l -> global_for_string s id :: l)
+      stringTable globs1 in
+  globs2
 
 (** ** Handling of inlined memcpy functions *)
 
@@ -498,7 +657,8 @@ let rec convertExpr env e =
       let ty = typeStringLiteral s in
       Evalof(Evar(name_for_string_literal env s, ty), ty)
   | C.EConst(C.CWStr s) ->
-      unsupported "wide string literal"; ezero
+      let ty = typeWideStringLiteral s in
+      Evalof(Evar(name_for_wide_string_literal env s, ty), ty)
   | C.EConst(C.CEnum(id, i)) ->
       Eval(Vint(convertInt i), ty)
   | C.ESizeof ty1 ->
@@ -768,8 +928,6 @@ let rec convertStmt ploc env s =
       Scontinue
   | C.Sswitch(e, s1) ->
       let (init, cases) = groupSwitch (flattenSwitch s1) in
-      if cases = [] then
-        unsupported "ill-formed 'switch' statement";
       if init.sdesc <> C.Sskip then
         warning "ignored code at beginning of 'switch'";
       let te = convertExpr env e in
@@ -847,7 +1005,7 @@ let convertFundef loc env fd =
       a_alignment = None;
       a_sections = Sections.for_function env id' fd.fd_ret;
       a_access = Sections.Access_default;
-      a_inline = fd.fd_inline;
+      a_inline = fd.fd_inline && not fd.fd_vararg;  (* PR#15 *)
       a_loc = loc };
   (id', Gfun(Internal {fn_return = ret;
                        fn_callconv = convertCallconv fd.fd_vararg fd.fd_attrib;
@@ -1059,6 +1217,13 @@ let cleanupGlobals p =
             clean defs (g :: accu) gl
   in clean IdentSet.empty [] (List.rev p)
 
+(** Extract the list of public (non-static) names *)
+
+let public_globals gl =
+  List.fold_left
+    (fun accu (id, g) -> if atom_is_static id then accu else id :: accu)
+    [] gl
+
 (** Convert a [C.program] into a [Csyntax.program] *)
 
 let convertProgram p =
@@ -1066,72 +1231,18 @@ let convertProgram p =
   stringNum := 0;
   Hashtbl.clear decl_atom;
   Hashtbl.clear stringTable;
+  Hashtbl.clear wstringTable;
   Hashtbl.clear compositeCache;
   let p = Builtins.declarations() @ p in
   try
     let gl1 = convertGlobdecls (translEnv Env.empty p) [] (cleanupGlobals p) in
     let gl2 = globals_for_strings gl1 in
     let p' = { AST.prog_defs = gl2;
-                AST.prog_main = intern_string "main" } in
+               AST.prog_public = public_globals gl2;
+               AST.prog_main = intern_string "main" } in
     if !numErrors > 0
     then None
     else Some p'
   with Env.Error msg ->
     error (Env.error_message msg); None
 
-(** ** Extracting information about global variables from their atom *)
-
-let atom_is_static a =
-  try
-    let i = Hashtbl.find decl_atom a in
-    (* inline functions can remain in generated code, but should not
-       be global, unless explicitly marked "extern" *)
-    match i.a_storage with
-    | C.Storage_default -> i.a_inline
-    | C.Storage_extern -> false
-    | C.Storage_static -> true
-    | C.Storage_register -> false (* should not happen *)
-  with Not_found ->
-    false
-
-let atom_is_extern a =
-  try
-    (Hashtbl.find decl_atom a).a_storage = C.Storage_extern
-  with Not_found ->
-    false
-
-let atom_alignof a =
-  try
-    (Hashtbl.find decl_atom a).a_alignment
-  with Not_found ->
-    None
-
-let atom_sections a =
-  try
-    (Hashtbl.find decl_atom a).a_sections
-  with Not_found ->
-    []
-
-let atom_is_small_data a ofs =
-  try
-    (Hashtbl.find decl_atom a).a_access = Sections.Access_near
-  with Not_found ->
-    false
-
-let atom_is_rel_data a ofs =
-  try
-    (Hashtbl.find decl_atom a).a_access = Sections.Access_far
-  with Not_found ->
-    false
-
-let atom_is_inline a =
-  try
-    (Hashtbl.find decl_atom a).a_inline
-  with Not_found ->
-    false
-
-let atom_location a =
-  try
-    (Hashtbl.find decl_atom a).a_loc
-  with Not_found ->
-    Cutil.no_loc

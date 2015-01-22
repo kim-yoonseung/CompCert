@@ -57,12 +57,6 @@ Extract Constant Iteration.GenIter.iterate =>
 
 (* Selection *)
 
-Extract Constant SelectLong.get_helper =>
-  "fun ge s sg ->
-     Errors.OK (Camlcoq.intern_string (Camlcoq.camlstring_of_coqstring s))".
-Extract Constant SelectLong.get_builtin =>
-  "fun s sg ->
-     Errors.OK (Camlcoq.intern_string (Camlcoq.camlstring_of_coqstring s))".
 Extract Constant Selection.compile_switch => "Switchaux.compile_switch".
 
 (* RTLgen *)
@@ -92,8 +86,14 @@ Extract Constant Compopts.propagate_float_constants =>
   "fun _ -> !Clflags.option_ffloatconstprop >= 1".
 Extract Constant Compopts.generate_float_constants =>
   "fun _ -> !Clflags.option_ffloatconstprop >= 2".
-Extract Constant Compopts.eliminate_tailcalls =>
+Extract Constant Compopts.optim_tailcalls =>
   "fun _ -> !Clflags.option_ftailcalls".
+Extract Constant Compopts.optim_constprop =>
+  "fun _ -> !Clflags.option_fconstprop".
+Extract Constant Compopts.optim_CSE =>
+  "fun _ -> !Clflags.option_fcse".
+Extract Constant Compopts.optim_redundancy =>
+  "fun _ -> !Clflags.option_fredundancy".
 Extract Constant Compopts.thumb =>
   "fun _ -> !Clflags.option_mthumb".
 
@@ -104,7 +104,7 @@ Extract Constant Compiler.print_RTL => "PrintRTL.print_if".
 Extract Constant Compiler.print_LTL => "PrintLTL.print_if".
 Extract Constant Compiler.print_Mach => "PrintMach.print_if".
 Extract Constant Compiler.print => "fun (f: 'a -> unit) (x: 'a) -> f x; x".
-Extract Constant Compiler.time  => "Clflags.time_coq".
+Extract Constant Compiler.time  => "Timing.time_coq".
 
 (*Extraction Inline Compiler.apply_total Compiler.apply_partial.*)
 

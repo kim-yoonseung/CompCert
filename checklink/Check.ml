@@ -1,4 +1,3 @@
-open Camlcoq
 open Asm
 open Asm_printers
 open AST
@@ -70,8 +69,8 @@ let name_of_section_Linux: section_name -> string = function
 | Section_text -> ".text"
 | Section_data i -> if i then ".data" else "COMM"
 | Section_small_data i -> if i then ".sdata" else ".sbss"
-| Section_const -> ".rodata"
-| Section_small_const -> ".sdata2"
+| Section_const i -> if i then ".rodata" else "COMM"
+| Section_small_const i -> if i then ".sdata2" else "COMM"
 | Section_string -> ".rodata"
 | Section_literal -> ".rodata.cst8"
 | Section_jumptable -> ".text"
@@ -80,10 +79,10 @@ let name_of_section_Linux: section_name -> string = function
 (** Adapted from CompCert *)
 let name_of_section_Diab: section_name -> string = function
 | Section_text -> ".text"
-| Section_data i -> if i then ".data" else ".bss"
+| Section_data i -> if i then ".data" else "COMM"
 | Section_small_data i -> if i then ".sdata" else ".sbss"
-| Section_const -> ".text"
-| Section_small_const -> ".sdata2"
+| Section_const _ -> ".text"
+| Section_small_const _ -> ".sdata2"
 | Section_string -> ".text"
 | Section_literal -> ".text"
 | Section_jumptable -> ".text"
@@ -92,7 +91,6 @@ let name_of_section_Diab: section_name -> string = function
 (** Taken from CompCert *)
 let name_of_section: section_name -> string =
   begin match Configuration.system with
-  | "macosx" -> fatal "Unsupported CompCert configuration: macosx"
   | "linux"  -> name_of_section_Linux
   | "diab"   -> name_of_section_Diab
   | _        -> fatal "Unsupported CompCert configuration"
@@ -536,12 +534,6 @@ let check_label_existence ffw =
     had the expected [size].
 *)
 let rec match_jmptbl lbllist vaddr size ffw =
-  let atom = Hashtbl.find ffw.sf.atoms ffw.this_ident in
-  let jmptbl_section =
-    match atom.a_sections with
-    | [_; _; j] -> j
-    | _ -> Section_jumptable
-  in
   let rec match_jmptbl_aux lbllist bs ffw =
     match lbllist with
     | [] -> OK ffw
@@ -557,21 +549,14 @@ let rec match_jmptbl lbllist vaddr size ffw =
     )
   in
   let elf = ffw.sf.ef.elf in
-  begin match section_at_vaddr elf vaddr with
+  begin match bitstring_at_vaddr elf vaddr size with
   | None -> ERR("No section for the jumptable")
-  | Some(sndx) ->
-      begin match bitstring_at_vaddr elf vaddr size with
-      | None -> ERR("")
-      | Some(bs, pofs, psize) ->
-          ffw
-          >>> (ff_sf ^%=
-              match_sections_name jmptbl_section elf.e_shdra.(sndx).sh_name
-          )
-          >>> match_jmptbl_aux lbllist bs
-          >>^ (ff_ef ^%=
-              add_range pofs psize 0 Jumptable
-          )
-      end
+  | Some(bs, pofs, psize) ->
+      ffw
+        >>> match_jmptbl_aux lbllist bs
+        >>^ (ff_ef ^%=
+               add_range pofs psize 0 Jumptable
+            )
   end
 
 let match_bo_bt_bool bo =
@@ -962,7 +947,7 @@ let rec compare_code ccode ecode pc: checker = fun fw ->
               let tblvaddr = Int32.(
                 add (shift_left (Safe32.of_int simm1) 16) (exts d2)
               ) in
-              let tblsize = Safe32.of_int (32 * List.length table) in
+              let tblsize = Safe32.of_int (4 * List.length table) in
               OK(fw)
               >>= match_iregs  GPR12 rA0
               >>= match_iregs  reg   rS0

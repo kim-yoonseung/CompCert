@@ -13,7 +13,6 @@
 (** Recognition of tail calls: correctness proof *)
 
 Require Import Coqlib.
-Require Import Compopts.
 Require Import Maps.
 Require Import AST.
 Require Import Integers.
@@ -183,10 +182,9 @@ Lemma transf_instr_lookup:
   exists i',  (transf_function f).(fn_code)!pc = Some i' /\ transf_instr_spec f i i'.
 Proof.
   intros. unfold transf_function.
-  destruct (zeq (fn_stacksize f) 0). destruct (eliminate_tailcalls tt).
+  destruct (zeq (fn_stacksize f) 0).
   simpl. rewrite PTree.gmap. rewrite H. simpl. 
   exists (transf_instr f pc i); split. auto. apply transf_instr_charact; auto. 
-  exists i; split. auto. constructor.
   exists i; split. auto. constructor.
 Qed.
 
@@ -243,6 +241,10 @@ Lemma symbols_preserved:
   forall (s: ident), Genv.find_symbol tge s = Genv.find_symbol ge s.
 Proof (Genv.find_symbol_transf transf_fundef prog).
 
+Lemma public_preserved:
+  forall (s: ident), Genv.public_symbol tge s = Genv.public_symbol ge s.
+Proof (Genv.public_symbol_transf transf_fundef prog).
+
 Lemma varinfo_preserved:
   forall b, Genv.find_var_info tge b = Genv.find_var_info ge b.
 Proof (Genv.find_var_info_transf transf_fundef prog).
@@ -263,14 +265,14 @@ Lemma sig_preserved:
   forall f, funsig (transf_fundef f) = funsig f.
 Proof.
   destruct f; auto. simpl. unfold transf_function. 
-  destruct (zeq (fn_stacksize f) 0 && eliminate_tailcalls tt); auto. 
+  destruct (zeq (fn_stacksize f) 0); auto. 
 Qed.
 
 Lemma stacksize_preserved:
   forall f, fn_stacksize (transf_function f) = fn_stacksize f.
 Proof.
   unfold transf_function. intros. 
-  destruct (zeq (fn_stacksize f) 0 && eliminate_tailcalls tt); auto.
+  destruct (zeq (fn_stacksize f) 0); auto.
 Qed.
 
 Lemma find_function_translated:
@@ -508,7 +510,7 @@ Proof.
   left. exists (State s' (transf_function f) (Vptr sp0 Int.zero) pc' (rs'#res <- v') m'1); split.
   eapply exec_Ibuiltin; eauto.
   eapply external_call_symbols_preserved; eauto.
-  exact symbols_preserved. exact varinfo_preserved.
+  exact symbols_preserved. exact public_preserved. exact varinfo_preserved.
   econstructor; eauto. apply regset_set; auto.
 
 (* cond *)
@@ -556,7 +558,7 @@ Proof.
   assert (fn_stacksize (transf_function f) = fn_stacksize f /\
           fn_entrypoint (transf_function f) = fn_entrypoint f /\
           fn_params (transf_function f) = fn_params f).
-    unfold transf_function. destruct (zeq (fn_stacksize f) 0 && eliminate_tailcalls tt); auto. 
+    unfold transf_function. destruct (zeq (fn_stacksize f) 0); auto. 
   destruct H0 as [EQ1 [EQ2 EQ3]]. 
   left. econstructor; split.
   simpl. eapply exec_function_internal; eauto. rewrite EQ1; eauto.
@@ -569,7 +571,7 @@ Proof.
   left. exists (Returnstate s' res' m2'); split.
   simpl. econstructor; eauto.
   eapply external_call_symbols_preserved; eauto.
-  exact symbols_preserved. exact varinfo_preserved.
+  exact symbols_preserved. exact public_preserved. exact varinfo_preserved.
   constructor; auto. 
 
 (* returnstate *)
@@ -618,7 +620,7 @@ Theorem transf_program_correct:
   forward_simulation (RTL.semantics prog) (RTL.semantics tprog).
 Proof.
   eapply forward_simulation_opt with (measure := measure); eauto.
-  eexact symbols_preserved.
+  eexact public_preserved.
   eexact transf_initial_states.
   eexact transf_final_states.
   exact transf_step_correct. 
